@@ -53,6 +53,7 @@ struct sdhc_host {
 	u_int8_t regs[14];		/* host controller state */
 	u_int16_t intr_status;		/* soft interrupt status */
 	u_int16_t intr_error_status;	/* soft error status */
+	u_int8_t vdd;			/* current vdd */
 
 	bus_dmamap_t adma_map;
 	bus_dma_segment_t adma_segs[1];
@@ -420,6 +421,8 @@ sdhc_host_reset(sdmmc_chipset_handle_t sch)
 
 	s = splsdmmc();
 
+	hp->vdd = 0;
+
 	/* Disable all interrupts. */
 	HWRITE2(hp, SDHC_NINTR_SIGNAL_EN, 0);
 
@@ -489,6 +492,14 @@ sdhc_bus_power(sdmmc_chipset_handle_t sch, u_int32_t ocr)
 	struct sdhc_host *hp = sch;
 	u_int8_t vdd;
 	int s;
+
+	/*
+	 * If the requested vdd is the same as current vdd return.
+	 */
+	if (hp->vdd == ocr)
+		return 0;
+
+	hp->vdd = ocr;
 
 	s = splsdmmc();
 

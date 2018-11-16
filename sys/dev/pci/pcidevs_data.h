@@ -17952,6 +17952,10 @@ static const struct pci_known_product pci_known_products[] = {
 	    "100 Series SPI",
 	},
 	{
+	    PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_100SERIES_LP_EMMC,
+	    "100 Series eMMC",
+	},
+	{
 	    PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_100SERIES_LP_XHCI,
 	    "100 Series xHCI",
 	},
