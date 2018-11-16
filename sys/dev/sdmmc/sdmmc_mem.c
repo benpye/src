@@ -64,6 +64,7 @@ int	sdmmc_mem_single_write_block(struct sdmmc_function *, int, u_char *,
 int	sdmmc_mem_write_block_subr(struct sdmmc_function *, bus_dmamap_t,
 	int, u_char *, size_t);
 
+#define SDMMC_DEBUG
 #ifdef SDMMC_DEBUG
 #define DPRINTF(s)	printf s
 #else
@@ -74,62 +75,62 @@ int	sdmmc_mem_write_block_subr(struct sdmmc_function *, bus_dmamap_t,
  * Initialize SD/MMC memory cards and memory in SDIO "combo" cards.
  */
 int
-sdmmc_mem_enable(struct sdmmc_softc *sc)
+sdmmc_mem_enable(struct sdmmc_softc *sc, int oldcard)
 {
-	u_int32_t host_ocr;
 	u_int32_t card_ocr;
 
 	rw_assert_wrlock(&sc->sc_lock);
 
-	/* Set host mode to SD "combo" card or SD memory-only. */
-	SET(sc->sc_flags, SMF_SD_MODE|SMF_MEM_MODE);
+	if (!oldcard) {
+		/* Set host mode to SD "combo" card or SD memory-only. */
+		SET(sc->sc_flags, SMF_SD_MODE|SMF_MEM_MODE);
 
-	/* Reset memory (*must* do that before CMD55 or CMD1). */
-	sdmmc_go_idle_state(sc);
+		/* Reset memory (*must* do that before CMD55 or CMD1). */
+		sdmmc_go_idle_state(sc);
 
-	/*
-	 * Read the SD/MMC memory OCR value by issuing CMD55 followed
-	 * by ACMD41 to read the OCR value from memory-only SD cards.
-	 * MMC cards will not respond to CMD55 or ACMD41 and this is
-	 * how we distinguish them from SD cards.
-	 */
+		/*
+		 * Read the SD/MMC memory OCR value by issuing CMD55 followed
+		 * by ACMD41 to read the OCR value from memory-only SD cards.
+		 * MMC cards will not respond to CMD55 or ACMD41 and this is
+		 * how we distinguish them from SD cards.
+		 */
  mmc_mode:
-	if (sdmmc_mem_send_op_cond(sc, 0, &card_ocr) != 0) {
-		if (ISSET(sc->sc_flags, SMF_SD_MODE) &&
-		    !ISSET(sc->sc_flags, SMF_IO_MODE)) {
-			/* Not a SD card, switch to MMC mode. */
-			CLR(sc->sc_flags, SMF_SD_MODE);
-			goto mmc_mode;
+		if (sdmmc_mem_send_op_cond(sc, 0, &card_ocr) != 0) {
+			if (ISSET(sc->sc_flags, SMF_SD_MODE) &&
+			    !ISSET(sc->sc_flags, SMF_IO_MODE)) {
+				/* Not a SD card, switch to MMC mode. */
+				CLR(sc->sc_flags, SMF_SD_MODE);
+				goto mmc_mode;
+			}
+			if (!ISSET(sc->sc_flags, SMF_SD_MODE)) {
+				DPRINTF(("%s: can't read memory OCR\n",
+				    DEVNAME(sc)));
+				return 1;
+			} else {
+				/* Not a "combo" card. */
+				CLR(sc->sc_flags, SMF_MEM_MODE);
+				return 0;
+			}
 		}
-		if (!ISSET(sc->sc_flags, SMF_SD_MODE)) {
-			DPRINTF(("%s: can't read memory OCR\n",
+
+		/* Set the lowest voltage supported by the card and host. */
+		sc->host_ocr = sdmmc_chip_host_ocr(sc->sct, sc->sch);
+		if (sdmmc_set_bus_power(sc, sc->host_ocr, card_ocr) != 0) {
+			DPRINTF(("%s: can't supply voltage requested by card\n",
 			    DEVNAME(sc)));
 			return 1;
-		} else {
-			/* Not a "combo" card. */
-			CLR(sc->sc_flags, SMF_MEM_MODE);
-			return 0;
 		}
+
+		sc->host_ocr &= card_ocr; /* only allow the common voltages */
+
+		if (sdmmc_send_if_cond(sc, card_ocr) == 0)
+			sc->host_ocr |= SD_OCR_SDHC_CAP;
 	}
 
-	/* Set the lowest voltage supported by the card and host. */
-	host_ocr = sdmmc_chip_host_ocr(sc->sct, sc->sch);
-	if (sdmmc_set_bus_power(sc, host_ocr, card_ocr) != 0) {
-		DPRINTF(("%s: can't supply voltage requested by card\n",
-		    DEVNAME(sc)));
-		return 1;
-	}
-
-	/* Tell the card(s) to enter the idle state (again). */
 	sdmmc_go_idle_state(sc);
 
-	host_ocr &= card_ocr; /* only allow the common voltages */
-
-	if (sdmmc_send_if_cond(sc, card_ocr) == 0)
-		host_ocr |= SD_OCR_SDHC_CAP;
-
 	/* Send the new OCR value until all cards are ready. */
-	if (sdmmc_mem_send_op_cond(sc, host_ocr, NULL) != 0) {
+	if (sdmmc_mem_send_op_cond(sc, sc->host_ocr, NULL) != 0) {
 		DPRINTF(("%s: can't send memory OCR\n", DEVNAME(sc)));
 		return 1;
 	}
@@ -141,7 +142,7 @@ sdmmc_mem_enable(struct sdmmc_softc *sc)
  * relative card address (RCA).  CMD2 is ignored by SDIO-only cards.
  */
 void
-sdmmc_mem_scan(struct sdmmc_softc *sc)
+sdmmc_mem_scan(struct sdmmc_softc *sc, int oldcard)
 {
 	struct sdmmc_command cmd;
 	struct sdmmc_function *sf;
@@ -151,74 +152,96 @@ sdmmc_mem_scan(struct sdmmc_softc *sc)
 
 	rw_assert_wrlock(&sc->sc_lock);
 
-	/*
-	 * CMD2 is a broadcast command understood by SD cards and MMC
-	 * cards.  All cards begin to respond to the command, but back
-	 * off if another card drives the CMD line to a different level.
-	 * Only one card will get its entire response through.  That
-	 * card remains silent once it has been assigned a RCA.
-	 */
-	for (i = 0; i < 100; i++) {
-		bzero(&cmd, sizeof cmd);
-		cmd.c_opcode = MMC_ALL_SEND_CID;
-		cmd.c_flags = SCF_CMD_BCR | SCF_RSP_R2;
-
-		error = sdmmc_mmc_command(sc, &cmd);
-		if (error == ETIMEDOUT) {
-			/* No more cards there. */
-			break;
-		} else if (error != 0) {
-			DPRINTF(("%s: can't read CID\n", DEVNAME(sc)));
-			break;
-		}
-
-		/* In MMC mode, find the next available RCA. */
-		next_rca = 1;
-		if (!ISSET(sc->sc_flags, SMF_SD_MODE))
-			SIMPLEQ_FOREACH(sf, &sc->sf_head, sf_list)
-				next_rca++;
-
-		/* Allocate a sdmmc_function structure. */
-		sf = sdmmc_function_alloc(sc);
-		sf->rca = next_rca;
-
+	if (!oldcard) {
 		/*
-		 * Remember the CID returned in the CMD2 response for
-		 * later decoding.
+		 * CMD2 is a broadcast command understood by SD cards and MMC
+		 * cards.  All cards begin to respond to the command, but back
+		 * off if another card drives the CMD line to a different level.
+		 * Only one card will get its entire response through.  That
+		 * card remains silent once it has been assigned a RCA.
 		 */
-		bcopy(cmd.c_resp, sf->raw_cid, sizeof sf->raw_cid);
+		for (i = 0; i < 100; i++) {
+			bzero(&cmd, sizeof cmd);
+			cmd.c_opcode = MMC_ALL_SEND_CID;
+			cmd.c_flags = SCF_CMD_BCR | SCF_RSP_R2;
 
-		/*
-		 * Silence the card by assigning it a unique RCA, or
-		 * querying it for its RCA in the case of SD.
-		 */
-		if (sdmmc_set_relative_addr(sc, sf) != 0) {
-			printf("%s: can't set mem RCA\n", DEVNAME(sc));
-			sdmmc_function_free(sf);
-			break;
-		}
+			error = sdmmc_mmc_command(sc, &cmd);
+			if (error == ETIMEDOUT) {
+				/* No more cards there. */
+				break;
+			} else if (error != 0) {
+				DPRINTF(("%s: can't read CID\n", DEVNAME(sc)));
+				break;
+			}
+
+			/* In MMC mode, find the next available RCA. */
+			next_rca = 1;
+			if (!ISSET(sc->sc_flags, SMF_SD_MODE))
+				SIMPLEQ_FOREACH(sf, &sc->sf_head, sf_list)
+					next_rca++;
+
+			/* Allocate a sdmmc_function structure. */
+			sf = sdmmc_function_alloc(sc);
+			sf->rca = next_rca;
+
+			/*
+			 * Remember the CID returned in the CMD2 response for
+			 * later decoding.
+			 */
+			bcopy(cmd.c_resp, sf->raw_cid, sizeof sf->raw_cid);
+
+			/*
+			 * Silence the card by assigning it a unique RCA, or
+			 * querying it for its RCA in the case of SD.
+			 */
+			if (sdmmc_set_relative_addr(sc, sf) != 0) {
+				printf("%s: can't set mem RCA\n", DEVNAME(sc));
+				sdmmc_function_free(sf);
+				break;
+			}
 
 #if 0
-		/* Verify that the RCA has been set by selecting the card. */
-		if (sdmmc_select_card(sc, sf) != 0) {
-			printf("%s: can't select mem RCA %d\n",
-			    DEVNAME(sc), sf->rca);
-			sdmmc_function_free(sf);
-			break;
-		}
+			/* Verify that the RCA has been set by selecting the card. */
+			if (sdmmc_select_card(sc, sf) != 0) {
+				printf("%s: can't select mem RCA %d\n",
+				    DEVNAME(sc), sf->rca);
+				sdmmc_function_free(sf);
+				break;
+			}
 
-		/* Deselect. */
-		(void)sdmmc_select_card(sc, NULL);
+			/* Deselect. */
+			(void)sdmmc_select_card(sc, NULL);
 #endif
 
-		/*
-		 * If this is a memory-only card, the card responding
-		 * first becomes an alias for SDIO function 0.
-		 */
-		if (sc->sc_fn0 == NULL)
-			sc->sc_fn0 = sf;
+			/*
+			 * If this is a memory-only card, the card responding
+			 * first becomes an alias for SDIO function 0.
+			 */
+			if (sc->sc_fn0 == NULL)
+				sc->sc_fn0 = sf;
 
-		SIMPLEQ_INSERT_TAIL(&sc->sf_head, sf, sf_list);
+			SIMPLEQ_INSERT_TAIL(&sc->sf_head, sf, sf_list);
+		}
+	} else {
+		SIMPLEQ_FOREACH(sf, &sc->sf_head, sf_list) {
+			bzero(&cmd, sizeof cmd);
+			cmd.c_opcode = MMC_ALL_SEND_CID;
+			cmd.c_flags = SCF_CMD_BCR | SCF_RSP_R2;
+
+			error = sdmmc_mmc_command(sc, &cmd);
+			if (error == ETIMEDOUT) {
+				/* XXX: This shouldn't happen, card has gone. */
+				break;
+			} else if (error != 0) {
+				DPRINTF(("%s: can't read CID\n", DEVNAME(sc)));
+				break;
+			}
+			if (sdmmc_set_relative_addr(sc, sf) != 0) {
+				printf("%s: can't set mem RCA\n", DEVNAME(sc));
+				/* XXX: What do we do now? */
+				break;
+			}
+		}
 	}
 
 	/*

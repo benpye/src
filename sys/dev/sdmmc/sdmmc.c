@@ -58,12 +58,15 @@ void	sdmmc_card_attach(struct sdmmc_softc *);
 void	sdmmc_card_detach(struct sdmmc_softc *, int);
 int	sdmmc_enable(struct sdmmc_softc *);
 void	sdmmc_disable(struct sdmmc_softc *);
+void	sdmmc_suspend(struct sdmmc_softc *);
+void	sdmmc_resume(struct sdmmc_softc *);
 int	sdmmc_scan(struct sdmmc_softc *);
 int	sdmmc_init(struct sdmmc_softc *);
 #ifdef SDMMC_IOCTL
 int	sdmmc_ioctl(struct device *, u_long, caddr_t);
 #endif
 
+#define SDMMC_DEBUG
 #ifdef SDMMC_DEBUG
 int sdmmcdebug = 0;
 extern int sdhcdebug;	/* XXX should have a sdmmc_chip_debug() function */
@@ -177,14 +180,25 @@ sdmmc_activate(struct device *self, int act)
 
 	switch (act) {
 	case DVACT_SUSPEND:
+		sdmmcdebug = 1;
 		rv = config_activate_children(self, act);
+		
+		/* XXX: This should be used for removable devices only */
 		/* If card in slot, cause a detach/re-attach */
-		if (ISSET(sc->sc_flags, SMF_CARD_PRESENT))
-			sc->sc_dying = -1;
+		/*if (ISSET(sc->sc_flags, SMF_CARD_PRESENT))
+			sc->sc_dying = -1;*/
+		
+		/* XXX; This should be used for non removable devices only */
+		sdmmc_suspend(sc);
 		break;
 	case DVACT_RESUME:
+		/* XXX: This should only be for non-removable */
+		// sdmmc_resume(sc);
+		sc->sc_dying = -2;	
+
 		rv = config_activate_children(self, act);
 		wakeup(&sc->sc_tskq);
+		//sdmmcdebug = 0;
 		break;
 	default:
 		rv = config_activate_children(self, act);
@@ -204,6 +218,8 @@ sdmmc_create_thread(void *arg)
 
 }
 
+extern int sdhcdebug;
+
 void
 sdmmc_task_thread(void *arg)
 {
@@ -213,7 +229,7 @@ sdmmc_task_thread(void *arg)
 
 restart:
 	sdmmc_needs_discover(&sc->sc_dev);
-
+resume:
 	s = splsdmmc();
 	while (!sc->sc_dying) {
 		for (task = TAILQ_FIRST(&sc->sc_tskq); task != NULL;
@@ -226,6 +242,14 @@ restart:
 		tsleep(&sc->sc_tskq, PWAIT, "mmctsk", 0);
 	}
 	splx(s);
+
+	if (sc->sc_dying == -2) {
+		sdmmc_resume(sc);
+		sc->sc_dying = 0;
+		sdmmcdebug = 0;
+		sdhcdebug = 0;
+		goto resume;
+	}
 
 	if (ISSET(sc->sc_flags, SMF_CARD_PRESENT)) {
 		rw_enter_write(&sc->sc_lock);
@@ -438,7 +462,7 @@ sdmmc_enable(struct sdmmc_softc *sc)
 
 	/* Initialize SD/MMC memory card(s). */
 	if (ISSET(sc->sc_flags, SMF_MEM_MODE) &&
-	    (error = sdmmc_mem_enable(sc)) != 0)
+	    (error = sdmmc_mem_enable(sc, 0)) != 0)
 		goto err;
 
  err:
@@ -446,6 +470,63 @@ sdmmc_enable(struct sdmmc_softc *sc)
 		sdmmc_disable(sc);
 
 	return error;
+}
+
+void
+sdmmc_resume(struct sdmmc_softc *sc)
+{
+	u_int32_t host_ocr;
+	int error;
+
+	rw_enter_write(&sc->sc_lock);
+
+	/*
+	 * Calculate the equivalent of the card OCR from the host
+	 * capabilities and select the maximum supported bus voltage.
+	 */
+	host_ocr = sdmmc_chip_host_ocr(sc->sct, sc->sch);
+	error = sdmmc_chip_bus_power(sc->sct, sc->sch, host_ocr);
+	if (error != 0) {
+		printf("%s: can't supply bus power\n", DEVNAME(sc));
+		goto err;
+	}
+
+	/*
+	 * Select the minimum clock frequency.
+	 */
+	error = sdmmc_chip_bus_clock(sc->sct, sc->sch,
+	    SDMMC_SDCLK_400KHZ, SDMMC_TIMING_LEGACY);
+	if (error != 0) {
+		printf("%s: can't supply clock\n", DEVNAME(sc));
+		goto err;
+	}
+
+	/* XXX wait for card to power up */
+	sdmmc_delay(250000);
+
+	/* We only support resuming memory cards */
+	if (ISSET(sc->sc_flags, SMF_MEM_MODE)) {
+		if ((error = sdmmc_mem_enable(sc, 1)) != 0)
+			goto err;
+		
+		sdmmc_mem_scan(sc, 1);
+	}
+
+	sdmmc_init(sc);
+
+err:
+	if (error != 0)
+		sdmmc_disable(sc);
+
+	rw_exit(&sc->sc_lock);
+}
+
+void
+sdmmc_suspend(struct sdmmc_softc *sc)
+{
+	rw_enter_write(&sc->sc_lock);
+	(void)sdmmc_select_card(sc, NULL);
+	rw_exit(&sc->sc_lock);
 }
 
 void
@@ -530,7 +611,7 @@ sdmmc_scan(struct sdmmc_softc *sc)
 
 	/* Scan for memory cards on the bus. */
 	if (ISSET(sc->sc_flags, SMF_MEM_MODE))
-		sdmmc_mem_scan(sc);
+		sdmmc_mem_scan(sc, 0);
 
 	/* There should be at least one function now. */
 	if (SIMPLEQ_EMPTY(&sc->sf_head)) {

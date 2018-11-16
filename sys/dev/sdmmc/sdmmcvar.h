@@ -215,6 +215,7 @@ struct sdmmc_softc {
 	TAILQ_HEAD(, sdmmc_intr_handler) sc_intrq; /* interrupt handlers */
 	long sc_max_xfer;		/* maximum transfer size */
 	void *sc_cookies[SDMMC_MAX_FUNCTIONS]; /* pass extra info from bus to dev */
+	uint32_t host_ocr;
 };
 
 /*
@@ -276,8 +277,8 @@ int	sdmmc_read_cis(struct sdmmc_function *, struct sdmmc_cis *);
 void	sdmmc_print_cis(struct sdmmc_function *);
 void	sdmmc_check_cis_quirks(struct sdmmc_function *);
 
-int	sdmmc_mem_enable(struct sdmmc_softc *);
-void	sdmmc_mem_scan(struct sdmmc_softc *);
+int	sdmmc_mem_enable(struct sdmmc_softc *, int);
+void	sdmmc_mem_scan(struct sdmmc_softc *, int);
 int	sdmmc_mem_init(struct sdmmc_softc *, struct sdmmc_function *);
 int	sdmmc_mem_read_block(struct sdmmc_function *, int, u_char *, size_t);
 int	sdmmc_mem_write_block(struct sdmmc_function *, int, u_char *, size_t);

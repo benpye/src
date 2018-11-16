@@ -106,6 +106,7 @@ void	sdhc_read_data(struct sdhc_host *, u_char *, int);
 void	sdhc_write_data(struct sdhc_host *, u_char *, int);
 int	sdhc_hibernate_init(sdmmc_chipset_handle_t, void *);
 
+#define SDHC_DEBUG
 #ifdef SDHC_DEBUG
 int sdhcdebug = 0;
 #define DPRINTF(n,s)	do { if ((n) <= sdhcdebug) printf s; } while (0)
@@ -360,6 +361,7 @@ sdhc_activate(struct device *self, int act)
 
 	switch (act) {
 	case DVACT_SUSPEND:
+		sdhcdebug = 2;
 		rv = config_activate_children(self, act);
 
 		/* Save the host controller state. */
@@ -374,10 +376,16 @@ sdhc_activate(struct device *self, int act)
 		for (n = 0; n < sc->sc_nhosts; n++) {
 			hp = sc->sc_host[n];
 			(void)sdhc_host_reset(hp);
-			for (i = 0; i < sizeof hp->regs; i++)
-				HWRITE1(hp, i, hp->regs[i]);
+
+			/* 
+			 * XXX: We might still want this for non-removable
+			 * devices?
+			 */
+			//for (i = 0; i < sizeof hp->regs; i++)
+			//	HWRITE1(hp, i, hp->regs[i]);
 		}
 		rv = config_activate_children(self, act);
+		// sdhcdebug = 0;
 		break;
 	case DVACT_POWERDOWN:
 		rv = config_activate_children(self, act);
@@ -1115,6 +1123,9 @@ sdhc_wait_intr_cold(struct sdhc_host *hp, int mask, int timo)
 {
 	int status;
 
+	/* XXX: Need this delay for some commands after suspend, why? */
+	//delay(10);
+
 	mask |= SDHC_ERROR_INTERRUPT;
 	timo = timo * tick;
 	status = hp->intr_status;
@@ -1294,6 +1305,8 @@ sdhc_dump_regs(struct sdhc_host *hp)
 	    HREAD4(hp, SDHC_PRESENT_STATE), SDHC_PRESENT_STATE_BITS);
 	printf("0x%02x POWER_CTL:        %x\n", SDHC_POWER_CTL,
 	    HREAD1(hp, SDHC_POWER_CTL));
+	printf("0x%02x CLOCK_CTL:        %x\n", SDHC_CLOCK_CTL,
+	    HREAD2(hp, SDHC_CLOCK_CTL));
 	printf("0x%02x NINTR_STATUS:     %x\n", SDHC_NINTR_STATUS,
 	    HREAD2(hp, SDHC_NINTR_STATUS));
 	printf("0x%02x EINTR_STATUS:     %x\n", SDHC_EINTR_STATUS,
