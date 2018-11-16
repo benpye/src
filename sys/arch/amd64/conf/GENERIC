@@ -177,6 +177,8 @@ imt*	at ihidev?		# HID-over-i2c multitouch trackpad
 wsmouse* at imt? mux 0
 iatp* at iic?			# Atmel maXTouch i2c touchpad/touchscreen
 wsmouse* at iatp? mux 0
+ietp* at iic?			# Elantech i2c touchpad
+wsmouse* at ietp? mux 0
 
 skgpio0 at isa? port 0x680	# Soekris net6501 GPIO and LEDs
 gpio* at skgpio?

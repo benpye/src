@@ -215,6 +215,11 @@ device	iatp: wsmousedev
 attach	iatp at i2c
 file	dev/i2c/iatp.c				iatp
 
+# Elantech trackpad
+device	ietp: wsmousedev
+attach	ietp at i2c
+file	dev/i2c/ietp.c				ietp
+
 # Bosch BMC150 6-axis eCompass
 device	bgw
 attach	bgw at i2c
